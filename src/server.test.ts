@@ -21,34 +21,18 @@ import { writeTestDevspaceConfig } from "./test-support/config.test.js";
 
 const execFileAsync = promisify(execFile);
 
-test("tool modes expose the expected host-facing tool surface", async (t) => {
+test("the POC branch exposes exactly wait_for_review_request", async (t) => {
   const cases: Array<{
     mode: ToolMode;
     expected: string[];
   }> = [
     {
       mode: "claude",
-      expected: [
-        "open_workspace",
-        "read",
-        "write",
-        "edit",
-        "bash",
-        "show_changes",
-        "wait_for_review_request",
-      ],
+      expected: ["wait_for_review_request"],
     },
     {
       mode: "codex",
-      expected: [
-        "open_workspace",
-        "read",
-        "apply_patch",
-        "exec_command",
-        "write_stdin",
-        "show_changes",
-        "wait_for_review_request",
-      ],
+      expected: ["wait_for_review_request"],
     },
   ];
 
@@ -186,7 +170,7 @@ test("UI metadata is limited to workspace and aggregate review", async (t) => {
         .map((tool) => tool.name)
         .sort();
 
-      assert.deepEqual(toolsWithUi, uiEnabled ? ["open_workspace", "show_changes"] : []);
+      assert.deepEqual(toolsWithUi, []);
     });
   }
 });

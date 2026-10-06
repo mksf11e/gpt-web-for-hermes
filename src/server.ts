@@ -349,6 +349,12 @@ function registerMcpSurface(
   const registrationTarget = trackToolActivity
     ? withTrackedToolHandlers(server, trackToolActivity)
     : server;
+
+  // POC branch: expose only the long-poll tool so one assistant turn can spend
+  // its whole budget waiting for an outside review request.
+  registerReviewPocTool(registrationTarget, config);
+  return;
+
   const toolSurface = getToolSurface(config.toolMode);
 
   registerAppResource(
