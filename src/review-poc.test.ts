@@ -48,11 +48,17 @@ async function fixture(t: TestContext): Promise<ReviewPocFixture> {
   return { client, config, stateDir, pendingFile: reviewPocPendingPath(stateDir) };
 }
 
-async function writePendingFile(pendingFile: string, reviewId: string): Promise<string> {
-  const contents = JSON.stringify({ review_id: reviewId, payload: `payload for ${reviewId}` });
+async function writePendingFile(pendingFile: string, reviewId: string): Promise<void> {
   await mkdir(join(pendingFile, ".."), { recursive: true });
-  await writeFile(pendingFile, contents, "utf8");
-  return contents;
+  await writeFile(
+    pendingFile,
+    JSON.stringify({ review_id: reviewId, payload: `payload for ${reviewId}` }),
+    "utf8",
+  );
+}
+
+async function assertFileAbsent(path: string): Promise<void> {
+  await assert.rejects(() => readFile(path, "utf8"), /ENOENT/);
 }
 
 // A clock the test advances by hand, so no test waits in real time.
@@ -88,26 +94,88 @@ test("wait_for_review_request blocks until the timeout and asks to be called aga
   });
   // 5 seconds at a 500 ms poll interval, with the last sleep shortened to the deadline.
   assert.deepEqual(polled, [500, 500, 500, 500, 500, 500, 500, 500, 500, 500]);
+  await assertFileAbsent(context.pendingFile);
 });
 
-test("wait_for_review_request returns the pending review when the file already exists", async (t) => {
+test("wait_for_review_request consumes pending.json after a successful review_ready result", async (t) => {
   const context = await fixture(t);
-  const contents = await writePendingFile(context.pendingFile, "review-already-there");
+  await writePendingFile(context.pendingFile, "POC-001");
 
   const outcome = await waitForReviewRequest({
     pendingFile: context.pendingFile,
-    timeoutSeconds: 420,
+    timeoutSeconds: 60,
     now: () => 0,
-    sleep: async () => assert.fail("must not sleep when the file is already present"),
+    sleep: async () => assert.fail("must not sleep when a review is pending"),
   });
 
   assert.deepEqual(outcome, {
     status: "review_ready",
-    review_id: "review-already-there",
-    payload: "payload for review-already-there",
+    review_id: "POC-001",
+    payload: "payload for POC-001",
     waited_seconds: 0,
   });
-  assert.equal(await readFile(context.pendingFile, "utf8"), contents);
+  await assertFileAbsent(context.pendingFile);
+});
+
+test("wait_for_review_request does not return the same review twice", async (t) => {
+  const context = await fixture(t);
+  await writePendingFile(context.pendingFile, "POC-001");
+
+  const first = await waitForReviewRequest({
+    pendingFile: context.pendingFile,
+    timeoutSeconds: 60,
+    now: () => 0,
+    sleep: async () => assert.fail("must not sleep when a review is pending"),
+  });
+  assert.equal(first.status, "review_ready");
+  assert.equal(first.review_id, "POC-001");
+
+  const clock = controllableClock();
+  const second = await waitForReviewRequest({
+    pendingFile: context.pendingFile,
+    timeoutSeconds: 5,
+    now: clock.now,
+    sleep: async (milliseconds) => {
+      clock.advance(milliseconds);
+    },
+  });
+
+  assert.deepEqual(second, {
+    status: "timeout",
+    continue_waiting: true,
+    waited_seconds: 5,
+  });
+});
+
+test("a review placed after the first one is consumed is returned normally", async (t) => {
+  const context = await fixture(t);
+  await writePendingFile(context.pendingFile, "POC-001");
+
+  const first = await waitForReviewRequest({
+    pendingFile: context.pendingFile,
+    timeoutSeconds: 60,
+    now: () => 0,
+    sleep: async () => assert.fail("must not sleep when a review is pending"),
+  });
+  assert.equal(first.status, "review_ready");
+  assert.equal(first.review_id, "POC-001");
+
+  await writePendingFile(context.pendingFile, "POC-002");
+
+  const second = await waitForReviewRequest({
+    pendingFile: context.pendingFile,
+    timeoutSeconds: 60,
+    now: () => 0,
+    sleep: async () => assert.fail("must not sleep when a review is pending"),
+  });
+
+  assert.deepEqual(second, {
+    status: "review_ready",
+    review_id: "POC-002",
+    payload: "payload for POC-002",
+    waited_seconds: 0,
+  });
+  await assertFileAbsent(context.pendingFile);
 });
 
 test("wait_for_review_request returns the pending review when the file appears while waiting", async (t) => {
@@ -163,9 +231,9 @@ test("wait_for_review_request watches only review-poc/pending.json under the sta
   assert.equal(context.pendingFile, join(context.config.stateDir, "review-poc", "pending.json"));
 });
 
-test("the MCP tool returns review_ready with the file contents", async (t) => {
+test("the MCP tool returns review_ready and consumes the pending file", async (t) => {
   const context = await fixture(t);
-  const contents = await writePendingFile(context.pendingFile, "review-over-mcp");
+  await writePendingFile(context.pendingFile, "review-over-mcp");
 
   const response = await context.client.callTool({
     name: "wait_for_review_request",
@@ -179,7 +247,47 @@ test("the MCP tool returns review_ready with the file contents", async (t) => {
     payload: "payload for review-over-mcp",
     waited_seconds: 0,
   });
-  assert.equal(await readFile(context.pendingFile, "utf8"), contents);
+  await assertFileAbsent(context.pendingFile);
+});
+
+test("the MCP tool delivers POC-001 then POC-002 without repeating the first", async (t) => {
+  const context = await fixture(t);
+  await writePendingFile(context.pendingFile, "POC-001");
+
+  const first = await context.client.callTool({
+    name: "wait_for_review_request",
+    arguments: { timeout_seconds: 5 },
+  });
+  assert.deepEqual(first.structuredContent, {
+    status: "review_ready",
+    review_id: "POC-001",
+    payload: "payload for POC-001",
+    waited_seconds: 0,
+  });
+  await assertFileAbsent(context.pendingFile);
+
+  const stillWaiting = await context.client.callTool({
+    name: "wait_for_review_request",
+    arguments: { timeout_seconds: 5 },
+  });
+  assert.deepEqual(stillWaiting.structuredContent, {
+    status: "timeout",
+    continue_waiting: true,
+    waited_seconds: 5,
+  });
+
+  await writePendingFile(context.pendingFile, "POC-002");
+  const second = await context.client.callTool({
+    name: "wait_for_review_request",
+    arguments: { timeout_seconds: 5 },
+  });
+  assert.deepEqual(second.structuredContent, {
+    status: "review_ready",
+    review_id: "POC-002",
+    payload: "payload for POC-002",
+    waited_seconds: 0,
+  });
+  await assertFileAbsent(context.pendingFile);
 });
 
 test("the MCP tool returns timeout with continue_waiting and leaves the state directory untouched", async (t) => {
@@ -196,8 +304,8 @@ test("the MCP tool returns timeout with continue_waiting and leaves the state di
     continue_waiting: true,
     waited_seconds: 5,
   });
-  await assert.rejects(() => readFile(context.pendingFile, "utf8"), /ENOENT/);
-  await assert.rejects(() => readFile(join(context.stateDir, "review-poc"), "utf8"), /ENOENT/);
+  await assertFileAbsent(context.pendingFile);
+  await assertFileAbsent(join(context.stateDir, "review-poc"));
 });
 
 test("the MCP tool reports an invalid timeout instead of waiting", async (t) => {
@@ -211,5 +319,5 @@ test("the MCP tool reports an invalid timeout instead of waiting", async (t) => 
   assert.equal(response.isError, true);
   const errorText = (response.content as Array<{ text: string }>)[0]?.text ?? "";
   assert.match(errorText, /timeout_seconds must be a whole number of seconds between 5 and 480/);
-  await assert.rejects(() => readFile(context.pendingFile, "utf8"), /ENOENT/);
+  await assertFileAbsent(context.pendingFile);
 });

@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import * as z from "zod/v4";
 import type { ServerConfig } from "./config.js";
@@ -68,6 +68,7 @@ export async function waitForReviewRequest(
   for (;;) {
     const pending = await readPendingReview(pendingFile);
     if (pending) {
+      await consumePendingReview(pendingFile);
       return {
         status: "review_ready",
         review_id: pending.review_id,
@@ -101,7 +102,7 @@ export function registerReviewPocTool(
       title: "Wait for review request",
       description: [
         "Block until an outside process drops a review request for this DevSpace installation.",
-        "It reads only the fixed file review-poc/pending.json inside the DevSpace state directory and never modifies or deletes it.",
+        "It reads only the fixed file review-poc/pending.json inside the DevSpace state directory, then consumes that file exactly once so the same review is never delivered twice.",
         "Whenever it returns status \"timeout\", call it again immediately so a single assistant turn can stay alive across hours of waiting.",
       ].join(" "),
       inputSchema: {
@@ -157,6 +158,12 @@ function outcomeText(outcome: ReviewPocResult): string {
   }
 
   return `No review request arrived within ${outcome.waited_seconds} seconds. Call ${TOOL_NAME} again to keep waiting.`;
+}
+
+// The POC consumes each review exactly once, so the next wait cannot deliver
+// the same request again and a later one can take its place.
+async function consumePendingReview(pendingFile: string): Promise<void> {
+  await rm(pendingFile, { force: true });
 }
 
 async function readPendingReview(
